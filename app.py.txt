@@ -1,0 +1,124 @@
+import streamlit as st
+import openpyxl
+import requests
+from io import BytesIO
+
+# --- Page Configuration ---
+st.set_page_config(page_title="Amazon Affiliate Linker", page_icon="🔗")
+
+st.title("Amazon Affiliate Link Generator")
+st.markdown("""
+This tool reads an Excel file (Column A: Title, Column B: Author), 
+searches for the book on Amazon, and generates an affiliate link in Column C.
+""")
+
+# --- Sidebar Inputs ---
+st.sidebar.header("Configuration")
+api_key = st.sidebar.text_input("Google API Key", type="password")
+cx_key = st.sidebar.text_input("Search Engine ID (CX)", type="password")
+affiliate_tag = st.sidebar.text_input("Amazon Affiliate Tag (e.g., /?tag=mycode-20)")
+
+# --- Helper Functions ---
+def google_search(query, api_key, cx_key):
+    """Queries the Google Custom Search API."""
+    url = f"https://www.googleapis.com/customsearch/v1?key={api_key}&cx={cx_key}&q={query}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def process_excel(uploaded_file, api_key, cx_key, affiliate_tag):
+    """Processes the excel file in memory."""
+    wb = openpyxl.load_workbook(uploaded_file)
+    ws = wb.active
+    
+    # Create a progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Count rows for progress bar (subtract 1 for header)
+    max_row = ws.max_row
+    
+    # Iterate through rows
+    for i, row in enumerate(ws.iter_rows(min_row=2, values_only=False), start=2):
+        # Update progress
+        progress = (i - 1) / (max_row - 1)
+        progress_bar.progress(min(progress, 1.0))
+        
+        title = row[0].value
+        author = row[1].value
+        
+        if not title:
+            continue
+            
+        status_text.text(f"Processing: {title}...")
+        
+        query = f"{title} {author} site:amazon.com"
+        search_results = google_search(query, api_key, cx_key)
+        
+        amazon_url = ""
+        
+        # Check for valid results
+        if "items" in search_results:
+            for item in search_results.get("items", []):
+                link = item.get("link", "")
+                if "amazon.com" in link and "/dp/" in link:
+                    amazon_url = link
+                    break
+        
+        # Modify URL with affiliate tag
+        if amazon_url:
+            dp_index = amazon_url.find("/dp/")
+            if dp_index != -1:
+                # Find end of product ID (usually 10 chars after /dp/)
+                # We look for the next slash after /dp/ + 1
+                start_of_id = dp_index + 4
+                next_slash = amazon_url.find("/", start_of_id)
+                
+                if next_slash == -1:
+                    # If URL ends with the ID
+                    base_url = amazon_url
+                else:
+                    # Cut off everything after the ID
+                    base_url = amazon_url[:next_slash]
+                
+                # Append the affiliate tag
+                # Ensure the tag provided by user starts correctly, usually ?tag= or /?tag=
+                final_url = f"{base_url}{affiliate_tag}"
+                
+                # Write to Column C (index 2)
+                row[2].value = final_url
+            else:
+                row[2].value = "Product ID not found in link"
+        else:
+            row[2].value = "No Amazon link found"
+
+    status_text.text("Processing Complete!")
+    progress_bar.progress(100)
+    
+    # Save to memory buffer
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
+
+# --- Main App Logic ---
+uploaded_file = st.file_uploader("Upload your Excel file (.xlsx)", type=["xlsx"])
+
+if uploaded_file and api_key and cx_key and affiliate_tag:
+    if st.button("Generate Links"):
+        with st.spinner("Searching Amazon..."):
+            processed_data = process_excel(uploaded_file, api_key, cx_key, affiliate_tag)
+            
+            st.success("File processed successfully!")
+            
+            st.download_button(
+                label="Download Updated Excel",
+                data=processed_data,
+                file_name="amazon_links_updated.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+elif uploaded_file:
+    st.warning("Please enter your API Key, CX Key, and Affiliate Tag in the sidebar.")
